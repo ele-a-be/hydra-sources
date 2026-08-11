@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import random
@@ -28,14 +29,15 @@ REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
 
+FAST_MAX_WORKERS = 30
+FAST_BATCH_SIZE = 30
+
 MONTH_MAP = {
     "january": 1, "february": 2, "march": 3, "april": 4,
     "may": 5, "june": 6, "july": 7, "august": 8,
     "september": 9, "october": 10, "november": 11, "december": 12,
 }
 
-# Approximate seconds-per-unit for relative dates like "2 weeks ago".
-# month/year are averages (30.44 / 365.25 days) since these are approximations anyway.
 RELATIVE_UNIT_SECONDS = {
     "second": 1,
     "minute": 60,
@@ -112,6 +114,26 @@ def normalise_download_url(href: str) -> str:
     return href
 
 
+BRACKETED_RE = re.compile(r"[\(\[\{][^\(\)\[\]\{\}]*[\)\]\}]")
+FREE_DOWNLOAD_RE = re.compile(r"(?i)\bfree\s+download\b")
+
+
+def clean_title(raw_title: str) -> str:
+    """Strip '(v1.00.09)'-style bracketed content, stray 'Free Download'
+    text, and surrounding/collapsed whitespace from a scraped title."""
+    text = raw_title
+
+    previous = None
+    while previous != text:
+        previous = text
+        text = BRACKETED_RE.sub("", text)
+
+    text = FREE_DOWNLOAD_RE.sub("", text)
+
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def parse_listing(html: str, base_url: str, logger: logging.Logger) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     items = soup.find_all("li", class_="az-list-item")
@@ -128,7 +150,7 @@ def parse_listing(html: str, base_url: str, logger: logging.Logger) -> list[dict
             continue
 
         href = anchor.get("href", "").strip()
-        title = anchor.get_text(strip=True)
+        title = clean_title(anchor.get_text(strip=True))
 
         if not href:
             logger.warning("Empty href for item '%s'. Skipping.", title)
@@ -240,6 +262,7 @@ def parse_detail(html: str, page_url: str, logger: logging.Logger) -> dict:
             "File size element not found on %s — looked for: <li><strong>Game Size: </strong>...</li>",
             page_url,
         )
+        result["fileSize"] = 0
 
     result["uris"] = parse_download_uris(soup)
     if not result["uris"]:
@@ -256,7 +279,7 @@ def scrape_item(item: dict, logger: logging.Logger) -> dict:
 
     html = fetch(item["url"], logger)
     if html is None:
-        return {"title": item["title"], "uploadDate": None, "fileSize": None, "uris": []}
+        return {"title": item["title"], "uploadDate": None, "fileSize": 0, "uris": []}
 
     detail = parse_detail(html, item["url"], logger)
     return {"title": item["title"], **detail}
@@ -264,11 +287,6 @@ def scrape_item(item: dict, logger: logging.Logger) -> dict:
 
 def scrape_all(items: list[dict], logger: logging.Logger) -> list[dict]:
     downloads = []
-    # logging_redirect_tqdm reroutes any log record printed to the console
-    # through tqdm.write() instead of a raw print, so warnings appear above
-    # the bar and the bar itself stays pinned to one self-overwriting line
-    # (works the same way in a Windows PowerShell console and in a Linux
-    # terminal).
     with logging_redirect_tqdm(loggers=[logger]):
         with tqdm(
             total=len(items),
@@ -281,7 +299,8 @@ def scrape_all(items: list[dict], logger: logging.Logger) -> list[dict]:
                 for batch_start in range(0, len(items), BATCH_SIZE):
                     batch = items[batch_start:batch_start + BATCH_SIZE]
                     for result in executor.map(lambda item: scrape_item(item, logger), batch):
-                        downloads.append(result)
+                        if result["uris"]:
+                            downloads.append(result)
                         progress_bar.update(1)
 
                     if batch_start + BATCH_SIZE < len(items):
@@ -290,8 +309,76 @@ def scrape_all(items: list[dict], logger: logging.Logger) -> list[dict]:
     return downloads
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Scrape a games listing site and dump download info to JSON.",
+    )
+
+    parser.add_argument("--base-url", default=BASE_URL, help=f"Site base URL (default: {BASE_URL})")
+    parser.add_argument("--list-suffix", default=LIST_SUFFIX, help=f"Listing page path suffix (default: {LIST_SUFFIX})")
+    parser.add_argument("--site-name", default=SITE_NAME, help=f"Name recorded in the output JSON (default: {SITE_NAME})")
+    parser.add_argument("--output", default=OUTPUT_PATH, help=f"Output JSON path (default: {OUTPUT_PATH})")
+    parser.add_argument("--log", default=LOG_PATH, help=f"Warnings/errors log path (default: {LOG_PATH})")
+
+    parser.add_argument("--impersonate", default=IMPERSONATE, help=f"Browser fingerprint to impersonate (default: {IMPERSONATE})")
+    parser.add_argument("--timeout", type=float, default=REQUEST_TIMEOUT, help=f"Per-request timeout in seconds (default: {REQUEST_TIMEOUT})")
+    parser.add_argument("--max-retries", type=int, default=MAX_RETRIES, help=f"Retry attempts per request (default: {MAX_RETRIES})")
+
+    # These five interact with --fast, so they default to None (unset) here.
+    # An explicit flag always wins over --fast — the resolution happens in main().
+    parser.add_argument("--max-workers", type=int, default=None, help=f"Concurrent request threads (default: {MAX_WORKERS}, {FAST_MAX_WORKERS} with --fast)")
+    parser.add_argument("--batch-size", type=int, default=None, help=f"Items per batch (default: {BATCH_SIZE}, {FAST_BATCH_SIZE} with --fast)")
+    parser.add_argument("--batch-delay-min", type=float, default=None, help=f"Minimum pause between batches, seconds (default: {BATCH_DELAY_RANGE[0]}, 0 with --fast)")
+    parser.add_argument("--batch-delay-max", type=float, default=None, help=f"Maximum pause between batches, seconds (default: {BATCH_DELAY_RANGE[1]}, 0 with --fast)")
+    parser.add_argument("--retry-delay", type=float, default=None, help=f"Delay between retries, seconds (default: {RETRY_DELAY}, 0 with --fast)")
+
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "Skip pauses between batches and retries, and raise worker/batch-size "
+            "defaults, to scrape as fast as possible. Passing --max-workers, "
+            "--batch-size, --batch-delay-min/max, or --retry-delay explicitly "
+            "still overrides the --fast value for that parameter."
+        ),
+    )
+
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+
+    global BASE_URL, LIST_SUFFIX, SITE_NAME, OUTPUT_PATH, LOG_PATH
+    global MAX_WORKERS, BATCH_SIZE, BATCH_DELAY_RANGE
+    global IMPERSONATE, REQUEST_TIMEOUT, MAX_RETRIES, RETRY_DELAY
+
+    BASE_URL = args.base_url
+    LIST_SUFFIX = args.list_suffix
+    SITE_NAME = args.site_name
+    OUTPUT_PATH = args.output
+    LOG_PATH = args.log
+    IMPERSONATE = args.impersonate
+    REQUEST_TIMEOUT = args.timeout
+    MAX_RETRIES = args.max_retries
+
+    MAX_WORKERS = args.max_workers if args.max_workers is not None else (FAST_MAX_WORKERS if args.fast else MAX_WORKERS)
+    BATCH_SIZE = args.batch_size if args.batch_size is not None else (FAST_BATCH_SIZE if args.fast else BATCH_SIZE)
+
+    if args.fast and args.batch_delay_min is None and args.batch_delay_max is None:
+        BATCH_DELAY_RANGE = (0.0, 0.0)
+    else:
+        delay_min = args.batch_delay_min if args.batch_delay_min is not None else BATCH_DELAY_RANGE[0]
+        delay_max = args.batch_delay_max if args.batch_delay_max is not None else BATCH_DELAY_RANGE[1]
+        BATCH_DELAY_RANGE = (delay_min, delay_max)
+
+    RETRY_DELAY = args.retry_delay if args.retry_delay is not None else (0.0 if args.fast else RETRY_DELAY)
+
     logger = build_logger(LOG_PATH)
+    logger.info(
+        "Config: base_url=%s max_workers=%d batch_size=%d batch_delay=%s retry_delay=%.2f fast=%s",
+        BASE_URL, MAX_WORKERS, BATCH_SIZE, BATCH_DELAY_RANGE, RETRY_DELAY, args.fast,
+    )
 
     listing_url = BASE_URL.rstrip("/") + LIST_SUFFIX
     logger.info("Fetching listing page: %s", listing_url)
