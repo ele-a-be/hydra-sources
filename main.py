@@ -255,7 +255,7 @@ def parse_detail(html: str, page_url: str, logger: logging.Logger) -> dict:
             "File size element not found on %s — looked for: <li><strong>Game Size: </strong>...</li>",
             page_url,
         )
-        result["fileSize"] = 0
+        result["fileSize"] = "0 GB"
 
     result["uris"] = parse_download_uris(soup)
     if not result["uris"]:
