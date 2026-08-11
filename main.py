@@ -119,8 +119,6 @@ FREE_DOWNLOAD_RE = re.compile(r"(?i)\bfree\s+download\b")
 
 
 def clean_title(raw_title: str) -> str:
-    """Strip '(v1.00.09)'-style bracketed content, stray 'Free Download'
-    text, and surrounding/collapsed whitespace from a scraped title."""
     text = raw_title
 
     previous = None
@@ -163,11 +161,6 @@ def parse_listing(html: str, base_url: str, logger: logging.Logger) -> list[dict
 
 
 def parse_relative_date(raw: str) -> datetime | None:
-    """Best-effort parse of relative dates like '2 weeks ago', 'yesterday', 'today'.
-
-    Returns an approximate UTC datetime (anchored to "now"), or None if the
-    string doesn't look like a relative date at all.
-    """
     text = raw.strip().lower()
     now = datetime.now(timezone.utc)
 
@@ -314,18 +307,10 @@ def parse_args() -> argparse.Namespace:
         description="Scrape a games listing site and dump download info to JSON.",
     )
 
-    parser.add_argument("--base-url", default=BASE_URL, help=f"Site base URL (default: {BASE_URL})")
-    parser.add_argument("--list-suffix", default=LIST_SUFFIX, help=f"Listing page path suffix (default: {LIST_SUFFIX})")
-    parser.add_argument("--site-name", default=SITE_NAME, help=f"Name recorded in the output JSON (default: {SITE_NAME})")
-    parser.add_argument("--output", default=OUTPUT_PATH, help=f"Output JSON path (default: {OUTPUT_PATH})")
-    parser.add_argument("--log", default=LOG_PATH, help=f"Warnings/errors log path (default: {LOG_PATH})")
-
     parser.add_argument("--impersonate", default=IMPERSONATE, help=f"Browser fingerprint to impersonate (default: {IMPERSONATE})")
     parser.add_argument("--timeout", type=float, default=REQUEST_TIMEOUT, help=f"Per-request timeout in seconds (default: {REQUEST_TIMEOUT})")
     parser.add_argument("--max-retries", type=int, default=MAX_RETRIES, help=f"Retry attempts per request (default: {MAX_RETRIES})")
 
-    # These five interact with --fast, so they default to None (unset) here.
-    # An explicit flag always wins over --fast — the resolution happens in main().
     parser.add_argument("--max-workers", type=int, default=None, help=f"Concurrent request threads (default: {MAX_WORKERS}, {FAST_MAX_WORKERS} with --fast)")
     parser.add_argument("--batch-size", type=int, default=None, help=f"Items per batch (default: {BATCH_SIZE}, {FAST_BATCH_SIZE} with --fast)")
     parser.add_argument("--batch-delay-min", type=float, default=None, help=f"Minimum pause between batches, seconds (default: {BATCH_DELAY_RANGE[0]}, 0 with --fast)")
@@ -349,15 +334,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    global BASE_URL, LIST_SUFFIX, SITE_NAME, OUTPUT_PATH, LOG_PATH
     global MAX_WORKERS, BATCH_SIZE, BATCH_DELAY_RANGE
     global IMPERSONATE, REQUEST_TIMEOUT, MAX_RETRIES, RETRY_DELAY
 
-    BASE_URL = args.base_url
-    LIST_SUFFIX = args.list_suffix
-    SITE_NAME = args.site_name
-    OUTPUT_PATH = args.output
-    LOG_PATH = args.log
     IMPERSONATE = args.impersonate
     REQUEST_TIMEOUT = args.timeout
     MAX_RETRIES = args.max_retries
